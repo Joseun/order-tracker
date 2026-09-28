@@ -1,0 +1,94 @@
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: incident-response
+    receivers:
+      - uid: incident-response-webhook
+        type: webhook
+        settings:
+          httpMethod: POST
+          url: http://incident-response:8001/alerts
+
+policies:
+  - orgId: 1
+    receiver: incident-response
+    group_by:
+      - grafana_folder
+      - alertname
+
+groups:
+  - orgId: 1
+    name: order-lookup-alerts
+    folder: Order Tracker
+    interval: 1m
+    rules:
+      - uid: order-lookup-5xx
+        title: Order lookup 5xx responses
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              editorMode: code
+              expr: sum(increase(order_lookup_requests_total{http_route="/api/orders/{order_id}",http_response_status_code=~"5.."}[5m])) or vector(0)
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              reducer: last
+              refId: B
+              settings:
+                mode: dropNN
+                reduceOptions:
+                  reducer: last
+                  values: false
+              type: reduce
+        dashboardUid: order-tracker-requests
+        panelId: 2
+        for: 1m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: 5xx responses from /api/orders/{order_id}
+          description: >-
+            The order lookup endpoint returned at least one 5xx response in the
+            last 5 minutes. Endpoint: /api/orders/{order_id}. Window: 5m.
+          endpoint: /api/orders/{order_id}
+          time_window: 5m
+          dashboard_url: http://localhost:3000/d/order-tracker-requests/order-tracker-requests?viewPanel=2
+        labels:
+          service: order-tracker
+          severity: critical
+        isPaused: false

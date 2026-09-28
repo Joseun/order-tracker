@@ -1,3 +1,5 @@
+import io
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -7,6 +9,9 @@ from app import main
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "orders.db")
+    for exporter in (main.span_exporter, main.metric_exporter, main.log_exporter):
+        if hasattr(exporter, "out"):
+            exporter.out = io.StringIO()
     with TestClient(main.app) as test_client:
         yield test_client
 
