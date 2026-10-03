@@ -38,3 +38,8 @@ def test_create_and_update_order(client):
 
 def test_missing_order(client):
     assert client.get("/api/orders/missing").status_code == 404
+
+
+def test_express_estimate_crosses_month_end():
+    order = {"priority": "express", "created_at": "2026-08-31T21:35:58+00:00"}
+    assert main.order_detail(order)["estimated_delivery"] == "2026-09-02"
