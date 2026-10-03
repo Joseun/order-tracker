@@ -89,18 +89,42 @@ services:
       LOKI_URL: http://loki:3100
       TEMPO_URL: http://tempo:3200
       INCIDENT_ASSISTANT_ENABLED: ${INCIDENT_ASSISTANT_ENABLED:-true}
-      INCIDENT_ASSISTANT_COMMAND: ${INCIDENT_ASSISTANT_COMMAND:-copilot}
-      INCIDENT_WORKSPACE_DIR: /workspace
-      GH_TOKEN: ${GH_TOKEN:-}
     volumes:
       - incidents:/data
-      - .:/workspace
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz', timeout=3)"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz', timeout=3)"]
       interval: 5s
       timeout: 3s
       retries: 12
+
+  incident-worker:
+    build:
+      context: .
+      dockerfile: incident-response/Dockerfile
+    command: ["uv", "run", "--no-sync", "python", "worker.py"]
+    environment:
+      INCIDENT_DATA_DIR: /data
+      INCIDENT_WORKSPACE_DIR: ${PWD}
+      INCIDENT_WORKTREES_DIR: ${PWD}/.incident-worktrees
+      ORDER_DB_PATH: /orders/orders.db
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      CLAUDE_CODE_MODEL: ${CLAUDE_CODE_MODEL:-sonnet}
+      CLAUDE_CODE_COMMAND: claude
+    volumes:
+      - incidents:/data
+      - orders:/orders:ro
+      # Same absolute path as the host, so worktree links work in host git too.
+      - .:${PWD}
+    depends_on:
+      - incident-response
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/incident-worker.heartbeat') > 1100)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
 volumes:
   orders:

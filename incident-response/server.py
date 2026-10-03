@@ -1,8 +1,6 @@
 import json
 import os
 import re
-import shlex
-import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,8 +23,6 @@ ASSISTANT_ENABLED = os.getenv("INCIDENT_ASSISTANT_ENABLED", "true").lower() in {
     "yes",
     "on",
 }
-ASSISTANT_COMMAND = shlex.split(os.getenv("INCIDENT_ASSISTANT_COMMAND", "copilot"))
-WORKSPACE_DIR = Path(os.getenv("INCIDENT_WORKSPACE_DIR", "/workspace"))
 app = FastAPI(title="Incident Response")
 
 
@@ -124,56 +120,15 @@ def write_incident(record: dict[str, Any], path: Path) -> None:
     temporary_path.replace(path)
 
 
-def start_assistant(record: dict[str, Any]) -> dict[str, Any]:
+def assistant_state(payload: dict[str, Any]) -> dict[str, Any]:
+    is_firing = payload.get("status") == "firing" or any(
+        alert.get("status") == "firing" for alert in payload.get("alerts", [])
+    )
+    if not is_firing:
+        return {"state": "skipped", "reason": "resolved"}
     if not ASSISTANT_ENABLED:
         return {"state": "disabled"}
-    if not any(os.getenv(key) for key in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")):
-        return {"state": "not_started", "error": "Set GH_TOKEN to authenticate Copilot CLI."}
-    if not ASSISTANT_COMMAND or not WORKSPACE_DIR.is_dir():
-        return {"state": "not_started", "error": "Assistant command or workspace is unavailable."}
-
-    incident_file = DATA_DIR / f"{record['id']}.json"
-    prompt = (
-        f"Investigate Grafana incident {record['id']}. Read {incident_file} for the alert, "
-        "affected endpoint, time window, logs, and traces. Inspect this repository, identify "
-        "the most likely cause, implement a focused fix if supported by the evidence, and run "
-        "relevant tests. Do not modify the incident archive. Summarize findings and changed "
-        "files in your final response."
-    )
-    command = [
-        *ASSISTANT_COMMAND,
-        "-C",
-        str(WORKSPACE_DIR),
-        "--add-dir",
-        str(DATA_DIR),
-        "-p",
-        prompt,
-        "--allow-all-tools",
-        "--no-ask-user",
-        "--no-auto-update",
-        "--mode",
-        "autopilot",
-        "--max-autopilot-continues",
-        "3",
-        "--secret-env-vars",
-        "GH_TOKEN",
-        "COPILOT_GITHUB_TOKEN",
-        "GITHUB_TOKEN",
-    ]
-    log_path = DATA_DIR / f"{record['id']}.assistant.log"
-    try:
-        with log_path.open("ab") as output:
-            process = subprocess.Popen(
-                command,
-                cwd=WORKSPACE_DIR,
-                stdin=subprocess.DEVNULL,
-                stdout=output,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-    except OSError as error:
-        return {"state": "not_started", "error": str(error)}
-    return {"state": "started", "pid": process.pid, "log_file": str(log_path)}
+    return {"state": "queued"}
 
 
 @app.get("/healthz")
@@ -213,17 +168,10 @@ def receive_alert(payload: dict[str, Any]):
             for endpoint in endpoints or [None]
         ],
         "payload": payload,
+        "assistant": assistant_state(payload),
     }
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    path = incident_path(incident_id)
-    write_incident(record, path)
-    is_firing = payload.get("status") == "firing" or any(
-        alert.get("status") == "firing" for alert in payload.get("alerts", [])
-    )
-    record["assistant"] = (
-        start_assistant(record) if is_firing else {"state": "skipped", "reason": "resolved"}
-    )
-    write_incident(record, path)
+    write_incident(record, incident_path(incident_id))
     return {
         "incident_id": incident_id,
         "status": "accepted",
@@ -246,6 +194,7 @@ def list_incidents():
                 "received_at": record["received_at"],
                 "status": record["status"],
                 "endpoints": record["endpoints"],
+                "assistant": record.get("assistant", {}).get("state"),
             }
         )
     return incidents

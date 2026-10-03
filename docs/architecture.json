@@ -1,0 +1,322 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Order Tracker: Observability and AI Incident Response",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client",
+      "sublabel": "browser / curl",
+      "pos": [
+        40,
+        160
+      ],
+      "size": [
+        130,
+        60
+      ]
+    },
+    {
+      "id": "app",
+      "type": "backend",
+      "label": "app",
+      "sublabel": "FastAPI :8000",
+      "pos": [
+        250,
+        160
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "orders",
+      "type": "database",
+      "label": "orders.db",
+      "sublabel": "SQLite volume",
+      "pos": [
+        250,
+        320
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "collector",
+      "type": "messagebus",
+      "label": "otel-collector",
+      "sublabel": "OTLP",
+      "pos": [
+        470,
+        160
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "prometheus",
+      "type": "database",
+      "label": "Prometheus",
+      "sublabel": "metrics",
+      "pos": [
+        690,
+        40
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "loki",
+      "type": "database",
+      "label": "Loki",
+      "sublabel": "logs",
+      "pos": [
+        690,
+        160
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "tempo",
+      "type": "database",
+      "label": "Tempo",
+      "sublabel": "traces",
+      "pos": [
+        690,
+        280
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "grafana",
+      "type": "frontend",
+      "label": "Grafana",
+      "sublabel": "dashboard + 5xx alert",
+      "pos": [
+        910,
+        160
+      ],
+      "size": [
+        150,
+        60
+      ]
+    },
+    {
+      "id": "receiver",
+      "type": "backend",
+      "label": "incident-response",
+      "sublabel": "POST /alerts :8001",
+      "pos": [
+        910,
+        440
+      ],
+      "size": [
+        150,
+        60
+      ]
+    },
+    {
+      "id": "incidents",
+      "type": "messagebus",
+      "label": "incidents volume",
+      "sublabel": "file queue",
+      "pos": [
+        690,
+        440
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "worker",
+      "type": "backend",
+      "label": "incident-worker",
+      "sublabel": "Claude Code headless",
+      "pos": [
+        470,
+        440
+      ],
+      "size": [
+        150,
+        60
+      ],
+      "tag": "holds token"
+    },
+    {
+      "id": "worktree",
+      "type": "frontend",
+      "label": "incident/<id>",
+      "sublabel": "git worktree",
+      "pos": [
+        250,
+        440
+      ],
+      "size": [
+        140,
+        60
+      ],
+      "tag": "human review"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Docker Compose stack",
+      "wraps": [
+        "app",
+        "orders",
+        "collector",
+        "prometheus",
+        "loki",
+        "tempo",
+        "grafana",
+        "receiver",
+        "incidents",
+        "worker"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "request",
+      "from": "client",
+      "to": "app",
+      "label": "HTTP",
+      "variant": "emphasis"
+    },
+    {
+      "id": "app-db",
+      "from": "app",
+      "to": "orders",
+      "label": "SQL",
+      "labelDy": 24
+    },
+    {
+      "id": "telemetry",
+      "from": "app",
+      "to": "collector",
+      "label": "OTLP"
+    },
+    {
+      "id": "to-prom",
+      "from": "collector",
+      "to": "prometheus"
+    },
+    {
+      "id": "to-loki",
+      "from": "collector",
+      "to": "loki"
+    },
+    {
+      "id": "to-tempo",
+      "from": "collector",
+      "to": "tempo"
+    },
+    {
+      "id": "alert-rule",
+      "from": "prometheus",
+      "to": "grafana",
+      "label": "5xx rule",
+      "fromSide": "right",
+      "toSide": "top"
+    },
+    {
+      "id": "query",
+      "from": "loki",
+      "to": "grafana",
+      "label": "query"
+    },
+    {
+      "id": "webhook",
+      "from": "grafana",
+      "to": "receiver",
+      "label": "webhook",
+      "variant": "emphasis",
+      "labelDy": 24
+    },
+    {
+      "id": "evidence",
+      "from": "receiver",
+      "to": "tempo",
+      "label": "fetch evidence",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "right"
+    },
+    {
+      "id": "enqueue",
+      "from": "receiver",
+      "to": "incidents",
+      "label": "queue",
+      "variant": "emphasis"
+    },
+    {
+      "id": "claim",
+      "from": "incidents",
+      "to": "worker",
+      "label": "claim",
+      "variant": "emphasis"
+    },
+    {
+      "id": "fix",
+      "from": "worker",
+      "to": "worktree",
+      "label": "fix + test",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ro-db",
+      "from": "worker",
+      "to": "orders",
+      "label": "read-only",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "right"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Observe",
+      "items": [
+        "App sends metrics, logs, traces via OTLP",
+        "Grafana alerts on 5xx from /api/orders/{order_id}"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Respond",
+      "items": [
+        "Receiver saves logs + traces, queues incident",
+        "Worker runs Claude Code in an isolated branch"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Guardrails",
+      "items": [
+        "Read-only DB, one pytest command",
+        "No commit or merge: a human reviews"
+      ]
+    }
+  ]
+}

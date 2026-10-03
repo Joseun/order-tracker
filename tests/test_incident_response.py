@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -13,6 +14,26 @@ SPEC = importlib.util.spec_from_file_location("incident_response_server", SERVIC
 incident_response = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = incident_response
 SPEC.loader.exec_module(incident_response)
+
+AGENT_PATH = Path(__file__).parents[1] / "incident-response" / "claude_runner.py"
+AGENT_SPEC = importlib.util.spec_from_file_location("incident_response_agent", AGENT_PATH)
+incident_agent = importlib.util.module_from_spec(AGENT_SPEC)
+sys.modules[AGENT_SPEC.name] = incident_agent
+AGENT_SPEC.loader.exec_module(incident_agent)
+sys.modules["claude_runner"] = incident_agent
+
+
+def load_service_module(name, filename):
+    spec = importlib.util.spec_from_file_location(
+        name, Path(__file__).parents[1] / "incident-response" / filename
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+incident_worker = load_service_module("incident_response_worker", "worker.py")
+db_query = load_service_module("incident_response_db_query", "db_query.py")
 
 
 @pytest.fixture
@@ -83,45 +104,121 @@ def test_loki_query_filters_endpoint_as_structured_metadata(monkeypatch):
     assert query == '{service_name="order-tracker"} | http_route="/api/orders/{order_id}"'
 
 
-def test_firing_alert_starts_copilot_headlessly(client, monkeypatch, tmp_path):
-    launched = []
-
-    class Process:
-        pid = 4321
-
-    def fake_popen(command, **kwargs):
-        launched.append((command, kwargs))
-        return Process()
-
+def test_firing_alert_is_queued_for_worker(client, monkeypatch):
     monkeypatch.setattr(incident_response, "ASSISTANT_ENABLED", True)
-    monkeypatch.setattr(incident_response, "ASSISTANT_COMMAND", ["copilot"])
-    monkeypatch.setattr(incident_response, "WORKSPACE_DIR", tmp_path)
-    monkeypatch.setattr(incident_response.subprocess, "Popen", fake_popen)
-    monkeypatch.setenv("GH_TOKEN", "test-token")
 
     response = client.post(
         "/alerts",
         json={"status": "firing", "alerts": [{"status": "firing"}]},
     )
 
-    assert response.json()["assistant"] == "started"
-    incident = client.get(f"/incidents/{response.json()['incident_id']}").json()
-    assert incident["assistant"]["pid"] == 4321
-    command, options = launched[0]
-    assert "--allow-all-tools" in command
-    assert "--no-ask-user" in command
-    assert "--mode" in command and command[command.index("--mode") + 1] == "autopilot"
-    assert options["cwd"] == tmp_path
-    assert options["stdin"] is incident_response.subprocess.DEVNULL
+    assert response.json()["assistant"] == "queued"
+    incident_id = response.json()["incident_id"]
+    assert client.get(f"/incidents/{incident_id}").json()["assistant"] == {"state": "queued"}
+    assert client.get("/incidents").json()[0]["assistant"] == "queued"
 
 
-def test_missing_github_token_records_assistant_not_started(client, monkeypatch):
+def test_resolved_alert_is_not_queued(client, monkeypatch):
     monkeypatch.setattr(incident_response, "ASSISTANT_ENABLED", True)
-    monkeypatch.delenv("GH_TOKEN", raising=False)
-    monkeypatch.delenv("COPILOT_GITHUB_TOKEN", raising=False)
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
 
-    response = client.post("/alerts", json={"status": "firing", "alerts": []})
+    response = client.post("/alerts", json={"status": "resolved", "alerts": []})
 
-    incident = client.get(f"/incidents/{response.json()['incident_id']}").json()
-    assert incident["assistant"]["state"] == "not_started"
+    assert response.json()["assistant"] == "skipped"
+
+
+@pytest.fixture
+def worker_data(tmp_path, monkeypatch):
+    monkeypatch.setattr(incident_worker, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(incident_agent, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(incident_worker, "HEARTBEAT_FILE", tmp_path / "heartbeat")
+    return tmp_path
+
+
+def write_record(directory, incident_id, state):
+    record = {"id": incident_id, "assistant": {"state": state}}
+    (directory / f"{incident_id}.json").write_text(json.dumps(record))
+
+
+def test_worker_claims_each_queued_incident_once(worker_data, monkeypatch):
+    queued = "11111111-1111-1111-1111-111111111111"
+    write_record(worker_data, queued, "queued")
+    write_record(worker_data, "22222222-2222-2222-2222-222222222222", "completed")
+    ran = []
+    monkeypatch.setattr(incident_agent, "run_agent", ran.append)
+
+    assert incident_worker.run_once() == queued
+    assert incident_worker.run_once() is None
+    assert ran == [queued]
+    assert (worker_data / "heartbeat").exists()
+
+
+def test_worker_fails_stale_running_job(worker_data):
+    incident_id = "33333333-3333-3333-3333-333333333333"
+    write_record(worker_data, incident_id, "running")
+    claim = worker_data / f"{incident_id}.claim"
+    claim.write_text("old-worker")
+    stale = incident_worker.time.time() - incident_worker.STALE_SECONDS - 1
+    incident_worker.os.utime(claim, (stale, stale))
+
+    incident_worker.fail_stale_jobs()
+
+    record = json.loads((worker_data / f"{incident_id}.json").read_text())
+    assert record["assistant"]["state"] == "failed"
+
+
+def test_worker_reports_missing_claude_token(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in incident_worker.setup_error()
+
+
+@pytest.fixture
+def orders_db(tmp_path):
+    path = tmp_path / "orders.db"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT)")
+    db.executemany("INSERT INTO orders (status) VALUES (?)", [("pending",), ("shipped",)])
+    db.commit()
+    db.close()
+    return path
+
+
+def test_db_query_returns_rows(orders_db):
+    result = db_query.run_query("SELECT id, status FROM orders ORDER BY id", orders_db)
+
+    assert result == {
+        "columns": ["id", "status"],
+        "rows": [[1, "pending"], [2, "shipped"]],
+        "truncated": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "UPDATE orders SET status = 'lost'",
+        "DELETE FROM orders",
+        "ATTACH DATABASE 'other.db' AS other",
+    ],
+)
+def test_db_query_rejects_changes(orders_db, sql):
+    with pytest.raises(sqlite3.Error):
+        db_query.run_query(sql, orders_db)
+
+    assert db_query.run_query("SELECT count(*) FROM orders", orders_db)["rows"] == [[2]]
+
+
+def test_claude_command_is_headless_and_restricted(tmp_path):
+    command = incident_agent.build_claude_command("Investigate the incident.")
+
+    assert "--print" in command
+    assert "--restricted" in command
+    assert "--permission-prompts" in command
+    assert command[command.index("--permission-prompts") + 1] == "none"
+    assert "--dangerously-skip-permissions" not in command
+    assert any(
+        item == "Bash(env -u CLAUDE_CODE_OAUTH_TOKEN uv run --frozen --group dev pytest -q)"
+        for item in command
+    )
+    assert incident_agent.DB_QUERY_TOOL in command
+    assert "Bash" not in command[command.index("--allowedTools") + 1 :]
